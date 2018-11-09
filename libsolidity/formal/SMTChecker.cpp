@@ -85,7 +85,6 @@ bool SMTChecker::visit(FunctionDefinition const& _function)
 		initializeLocalVariables(_function);
 	}
 
-	m_loopExecutionHappened = false;
 	return true;
 }
 
@@ -128,26 +127,13 @@ bool SMTChecker::visit(IfStatement const& _node)
 
 bool SMTChecker::visit(WhileStatement const& _node)
 {
-	auto touchedVariables = m_variableUsage->touchedVariables(_node);
-	resetVariables(touchedVariables);
 	if (_node.isDoWhile())
-	{
-		visitBranch(_node.body());
-		// TODO the assertions generated in the body should still be active in the condition
-		_node.condition().accept(*this);
-		if (isRootFunction())
-			checkBooleanNotConstant(_node.condition(), "Do-while loop condition is always $VALUE.");
-	}
-	else
-	{
-		_node.condition().accept(*this);
-		if (isRootFunction())
-			checkBooleanNotConstant(_node.condition(), "While loop condition is always $VALUE.");
+		_node.body().accept(*this);
+	_node.condition().accept(*this);
 
-		visitBranch(_node.body(), expr(_node.condition()));
-	}
-	m_loopExecutionHappened = true;
-	resetVariables(touchedVariables);
+	auto indicesEndLoop = visitBranch(_node.body(), expr(_node.condition()));
+	auto touchedVariables = m_variableUsage->touchedVariables(_node.body());
+	mergeVariables(touchedVariables, expr(_node.condition()), indicesEndLoop, copyVariableIndices());
 
 	return false;
 }
@@ -157,38 +143,19 @@ bool SMTChecker::visit(ForStatement const& _node)
 	if (_node.initializationExpression())
 		_node.initializationExpression()->accept(*this);
 
-	// Do not reset the init expression part.
-	auto touchedVariables =
-		m_variableUsage->touchedVariables(_node.body());
 	if (_node.condition())
-		touchedVariables += m_variableUsage->touchedVariables(*_node.condition());
-	if (_node.loopExpression())
-		touchedVariables += m_variableUsage->touchedVariables(*_node.loopExpression());
-	// Remove duplicates
-	std::sort(touchedVariables.begin(), touchedVariables.end());
-	touchedVariables.erase(std::unique(touchedVariables.begin(), touchedVariables.end()), touchedVariables.end());
-
-	resetVariables(touchedVariables);
-
-	if (_node.condition())
-	{
 		_node.condition()->accept(*this);
-		if (isRootFunction())
-			checkBooleanNotConstant(*_node.condition(), "For loop condition is always $VALUE.");
-	}
 
-	m_interface->push();
-	if (_node.condition())
-		m_interface->addAssertion(expr(*_node.condition()));
+	auto indicesBeforeLoop = copyVariableIndices();
 	_node.body().accept(*this);
+	auto touchedVariables = m_variableUsage->touchedVariables(_node.body());
 	if (_node.loopExpression())
+	{
 		_node.loopExpression()->accept(*this);
-
-	m_interface->pop();
-
-	m_loopExecutionHappened = true;
-
-	resetVariables(touchedVariables);
+		touchedVariables += m_variableUsage->touchedVariables(*_node.loopExpression());
+	}
+	auto forCondition = _node.condition() ? expr(*_node.condition()) : smt::Expression(true);
+	mergeVariables(touchedVariables, forCondition, copyVariableIndices(), indicesBeforeLoop);
 
 	return false;
 }
@@ -803,11 +770,6 @@ void SMTChecker::checkCondition(
 	vector<string> values;
 	tie(result, values) = checkSatisfiableAndGenerateModel(expressionsToEvaluate);
 
-	string loopComment;
-	if (m_loopExecutionHappened)
-		loopComment =
-			"\nNote that some information is erased after the execution of loops.\n"
-			"You can re-introduce information using require().";
 	switch (result)
 	{
 	case smt::CheckResult::SATISFIABLE:
@@ -826,19 +788,19 @@ void SMTChecker::checkCondition(
 
 			for (auto const& eval: sortedModel)
 				modelMessage << "  " << eval.first << " = " << eval.second << "\n";
-			m_errorReporter.warning(_location, message.str() + loopComment, SecondarySourceLocation().append(modelMessage.str(), SourceLocation()));
+			m_errorReporter.warning(_location, message.str(), SecondarySourceLocation().append(modelMessage.str(), SourceLocation()));
 		}
 		else
 		{
 			message << ".";
-			m_errorReporter.warning(_location, message.str() + loopComment);
+			m_errorReporter.warning(_location, message.str());
 		}
 		break;
 	}
 	case smt::CheckResult::UNSATISFIABLE:
 		break;
 	case smt::CheckResult::UNKNOWN:
-		m_errorReporter.warning(_location, _description + " might happen here." + loopComment);
+		m_errorReporter.warning(_location, _description + " might happen here.");
 		break;
 	case smt::CheckResult::CONFLICTING:
 		m_errorReporter.warning(_location, "At least two SMT solvers provided conflicting answers. Results might not be sound.");

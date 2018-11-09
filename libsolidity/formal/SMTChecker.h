@@ -188,7 +188,6 @@ private:
 
 	std::shared_ptr<smt::SolverInterface> m_interface;
 	std::shared_ptr<VariableUsage> m_variableUsage;
-	bool m_loopExecutionHappened = false;
 	/// An Expression may have multiple smt::Expression due to
 	/// repeated calls to the same function.
 	std::unordered_map<Expression const*, std::shared_ptr<SymbolicVariable>> m_expressions;
